@@ -1,8 +1,8 @@
-# Auto Change Wallpaper
+# Bing Wallpaper
 
 [EN](README.md) | [简中](README_zh-CN.md)
 
-Auto Change Wallpaper is a Python script that downloads daily wallpapers from Bing, adds watermarks, sets them as desktop wallpapers, and copies them to the desktop.
+BingWallpaper is a Python script that downloads daily wallpapers from Bing, adds watermarks, sets them as desktop wallpapers, and copies them to the desktop.
 
 ## Features
 
@@ -16,7 +16,7 @@ Auto Change Wallpaper is a Python script that downloads daily wallpapers from Bi
 1. Clone this repository:
     ```bash
     git clone https://github.com/LtgXs/BingWallpaper.git
-    cd AutoChangeWallpaper
+    cd BingWallpaper
     ```
 
 2. Install dependencies:
