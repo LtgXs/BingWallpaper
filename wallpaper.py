@@ -1,4 +1,5 @@
 import os
+import shutil
 import requests
 import json
 from datetime import datetime
@@ -14,7 +15,6 @@ DEFAULT_CONFIG = {
     "chk": "true",
     "ctd": "true",
     "wtm": "false",
-    "wtc": 1,
     "retry_delay": 3,
     "retry_count": 10,
     "watermarks": [
@@ -25,7 +25,8 @@ DEFAULT_CONFIG = {
             "opacity": 50 
         }
     ],
-    "post_execution_apps": []
+    "post_execution_apps": [],
+    "copy_to_paths": []
 }
 
 def load_config(log_file):
@@ -56,7 +57,7 @@ def load_config(log_file):
 def validate_config_value(key, value):
     if key in ["chk", "ctd", "wtm"]:
         return value in ["true", "false"]
-    elif key in ["wtc", "retry_delay", "retry_count"]:
+    elif key in ["retry_delay", "retry_count"]:
         return isinstance(value, int) and value > 0
     elif key == "watermarks":
         for wm in value:
@@ -65,8 +66,8 @@ def validate_config_value(key, value):
             if not (isinstance(wm.get("opacity", 50), int) and 0 <= wm["opacity"] <= 100):
                 return False
         return True
-    elif key == "post_execution_apps":
-        return isinstance(value, list) and all(isinstance(app, str) for app in value)
+    elif key == "post_execution_apps" or key == "copy_to_paths":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
     return True
 
 def log_message(message, log_file):
@@ -95,7 +96,7 @@ def download_file(url, path, log_file, retry_delay, retry_count):
     log_message(f'Failed to download {url} after {retry_count} attempts', log_file)
     return False
 
-def add_watermark(image_path, watermarks, wtc, watermark_file, log_file):
+def add_watermark(image_path, watermarks, watermark_file, log_file):
     try:
         base_image = Image.open(image_path)
         draw = ImageDraw.Draw(base_image)
@@ -108,8 +109,7 @@ def add_watermark(image_path, watermarks, wtc, watermark_file, log_file):
         y = height - textheight - int(height * 0.10)
         draw.text((x, y), text, font=font, fill=(128, 128, 128, 204))
         
-        for i in range(min(wtc, len(watermarks))):
-            wm = watermarks[i]
+        for i, wm in enumerate(watermarks):
             watermark_path = wm.get('path', watermark_file)
             posX = float(wm.get('posX', '2'))
             posY = float(wm.get('posY', '1.2'))
@@ -173,21 +173,21 @@ def main():
     os.makedirs(dfolder, exist_ok=True)
     log_file = os.path.join(dfolder, f'{name}.log')
 
-    log_message('\n********************Log Start********************', log_file)
+    log_message('********************Log Start********************', log_file)
     config = load_config(log_file)
     idx = config['idx']
     mkt = config['mkt']
     chk = config['chk']
     ctd = config['ctd']
     wtm = config['wtm']
-    wtc = int(config['wtc'])
     retry_delay = config['retry_delay']
     retry_count = config['retry_count']
     watermarks = config['watermarks']
     post_execution_apps = config['post_execution_apps']
+    copy_to_paths = config.get('copy_to_paths', [])
     
     watermark_details = ', '.join([f'Watermark {i+1}: path={wm["path"]}, posX={wm["posX"]}, posY={wm["posY"]}' for i, wm in enumerate(watermarks)])
-    log_message(f'Config values: idx={idx}, mkt={mkt}, chk={chk}, ctd={ctd}, wtm={wtm}, wtc={wtc}, retry_delay={retry_delay}, retry_count={retry_count}, {watermark_details}, post_execution_apps={post_execution_apps}', log_file)
+    log_message(f'Config values: idx={idx}, mkt={mkt}, chk={chk}, ctd={ctd}, wtm={wtm}, retry_delay={retry_delay}, retry_count={retry_count}, {watermark_details}, post_execution_apps={post_execution_apps}, copy_to_paths={copy_to_paths}', log_file)
 
     try:
         if chk == 'true' and os.path.exists(os.path.join(dfolder, f'{name}.jpg')):
@@ -216,8 +216,20 @@ def main():
             log_message('Failed to download image', log_file)
             return
 
+        for path in copy_to_paths:
+            try:
+                expanded_path = os.path.expandvars(path)
+                os.makedirs(expanded_path, exist_ok=True)
+                shutil.copy(image_path, os.path.join(expanded_path, f'{name}.jpg'))
+                log_message(f'Original image copied to {expanded_path}', log_file)
+            except Exception as e:
+                log_message(f'Failed to copy original image to {expanded_path}: {e}', log_file)
+
         if wtm == 'true':
-            add_watermark(image_path, watermarks, wtc, watermark_file, log_file)
+            original_image_path = os.path.join(dfolder, f'{name}_original.jpg')
+            shutil.copy(image_path, original_image_path)
+            log_message(f'Original image saved as {original_image_path}', log_file)
+            add_watermark(image_path, watermarks, watermark_file, log_file)
 
         set_wallpaper(image_path, log_file)
 
