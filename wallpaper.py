@@ -5,6 +5,7 @@ from datetime import datetime
 import ctypes
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import time
+import subprocess
 
 CONFIG_PATH = 'config.json'
 DEFAULT_CONFIG = {
@@ -23,10 +24,11 @@ DEFAULT_CONFIG = {
             "posY": "1.2",
             "opacity": 50 
         }
-    ]
+    ],
+    "post_execution_apps": []
 }
 
-def load_config():
+def load_config(log_file):
     config = DEFAULT_CONFIG.copy()
     if os.path.exists(CONFIG_PATH):
         try:
@@ -37,13 +39,13 @@ def load_config():
                     if validate_config_value(key, user_config[key]):
                         config[key] = user_config[key]
                     else:
-                        print(f'Invalid value for {key}: {user_config[key]}. Resetting to default value.')
+                        log_message(f'Invalid value for {key}: {user_config[key]}. Resetting to default value.', log_file)
                 else:
-                    print(f'Missing key {key}. Resetting to default value.')
+                    log_message(f'Missing key {key}. Resetting to default value.', log_file)
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
         except (json.JSONDecodeError, ValueError) as e:
-            print(f'Error loading config: {e}. Resetting invalid entries to default values.')
+            log_message(f'Error loading config: {e}. Resetting invalid entries to default values.', log_file)
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
     else:
@@ -63,9 +65,17 @@ def validate_config_value(key, value):
             if not (isinstance(wm.get("opacity", 50), int) and 0 <= wm["opacity"] <= 100):
                 return False
         return True
+    elif key == "post_execution_apps":
+        return isinstance(value, list) and all(isinstance(app, str) for app in value)
     return True
 
 def log_message(message, log_file):
+    global log_initialized
+    if not log_initialized:
+        if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+            with open(log_file, 'a', encoding='utf-8') as log:
+                log.write('\n')
+        log_initialized = True
     with open(log_file, 'a', encoding='utf-8') as log:
         log.write(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {message}\n')
 
@@ -97,20 +107,26 @@ def add_watermark(image_path, watermarks, wtc, watermark_file, log_file):
         x = (width - textwidth) / 2
         y = height - textheight - int(height * 0.10)
         draw.text((x, y), text, font=font, fill=(128, 128, 128, 204))
-
+        
         for i in range(min(wtc, len(watermarks))):
             wm = watermarks[i]
             watermark_path = wm.get('path', watermark_file)
             posX = float(wm.get('posX', '2'))
             posY = float(wm.get('posY', '1.2'))
             opacity = wm.get('opacity', 50) / 100
-            watermark = Image.open(watermark_path).convert("RGBA")
-            watermark = watermark.resize((int(base_image.width / 5), int(base_image.height / 5)))
-            alpha = watermark.split()[3]
-            alpha = ImageEnhance.Brightness(alpha).enhance(opacity)
-            watermark.putalpha(alpha)
-            base_image.paste(watermark, (int(base_image.width / posX), int(base_image.height / posY)), watermark)
-            log_message(f'Watermark {i+1} added successfully at position ({posX}, {posY}) with opacity {opacity*100}%', log_file)
+            try:
+                watermark = Image.open(watermark_path).convert("RGBA")
+                watermark = watermark.resize((int(base_image.width / 5), int(base_image.height / 5)))
+                alpha = watermark.split()[3]
+                alpha = ImageEnhance.Brightness(alpha).enhance(opacity)
+                watermark.putalpha(alpha)
+                base_image.paste(watermark, (int(base_image.width / posX), int(base_image.height / posY)), watermark)
+                log_message(f'Watermark {i+1} added successfully at position ({posX}, {posY}) with opacity {opacity*100}%', log_file)
+            except FileNotFoundError:
+                log_message(f'Watermark {i+1} file not found: {watermark_path}', log_file)
+            except Exception as e:
+                log_message(f'Failed to add watermark {i+1}: {e}', log_file)
+        
         base_image.save(image_path, quality=95)
     except Exception as e:
         log_message(f'Failed to add watermark: {e}', log_file)
@@ -132,8 +148,33 @@ def copy_to_desktop(image_path, log_file):
     except Exception as e:
         log_message(f'Failed to copy wallpaper to desktop: {e}', log_file)
 
+def expand_environment_variables(path):
+    return os.path.expandvars(path)
+def run_post_execution_apps(apps, log_file):
+    for app in apps:
+        app_path = expand_environment_variables(app)
+        log_message(f'Trying to execute {app_path}', log_file)
+        try:
+            result = subprocess.run(app_path, check=True)
+            log_message(f'Successfully executed {app_path} with return code {result.returncode}', log_file)
+        except subprocess.CalledProcessError as e:
+            log_message(f'Failed to execute {app_path}: {e}', log_file)
+        except Exception as e:
+            log_message(f'Unexpected error while executing {app_path}: {e}', log_file)
+
 def main():
-    config = load_config()
+    global log_initialized
+    log_initialized = False
+    name = datetime.now().strftime('%Y.%m.%d')
+    bing_api = 'https://www.bing.com/HPImageArchive.aspx?n=1'
+    folder = os.path.join(os.getenv('APPDATA'), 'AutoWallpaper')
+    dfolder = os.path.join(folder, name)
+    watermark_file = os.path.join(folder, 'watermark.png')
+    os.makedirs(dfolder, exist_ok=True)
+    log_file = os.path.join(dfolder, f'{name}.log')
+
+    log_message('\n********************Log Start********************', log_file)
+    config = load_config(log_file)
     idx = config['idx']
     mkt = config['mkt']
     chk = config['chk']
@@ -143,18 +184,10 @@ def main():
     retry_delay = config['retry_delay']
     retry_count = config['retry_count']
     watermarks = config['watermarks']
-
-    name = datetime.now().strftime('%Y.%m.%d')
-    bing_api = 'https://www.bing.com/HPImageArchive.aspx?n=1'
-    folder = os.path.join(os.getenv('APPDATA'), 'AutoWallpaper')
-    dfolder = os.path.join(folder, name)
-    watermark_file = os.path.join(folder, 'watermark.png')
-
-    os.makedirs(dfolder, exist_ok=True)
-
-    log_file = os.path.join(dfolder, f'{name}.log')
-    log_message('\n********************Log Start********************', log_file)
-    log_message(f'Config value: idx={idx}, mkt={mkt}, chk={chk}, ctd={ctd}, wtm={wtm}, wtc={wtc}, retry_delay={retry_delay}, retry_count={retry_count}', log_file)
+    post_execution_apps = config['post_execution_apps']
+    
+    watermark_details = ', '.join([f'Watermark {i+1}: path={wm["path"]}, posX={wm["posX"]}, posY={wm["posY"]}' for i, wm in enumerate(watermarks)])
+    log_message(f'Config values: idx={idx}, mkt={mkt}, chk={chk}, ctd={ctd}, wtm={wtm}, wtc={wtc}, retry_delay={retry_delay}, retry_count={retry_count}, {watermark_details}, post_execution_apps={post_execution_apps}', log_file)
 
     try:
         if chk == 'true' and os.path.exists(os.path.join(dfolder, f'{name}.jpg')):
@@ -190,6 +223,8 @@ def main():
 
         if ctd == 'true':
             copy_to_desktop(image_path, log_file)
+
+        run_post_execution_apps(post_execution_apps, log_file)
 
     finally:
         log_message('*********************Log End*********************', log_file)
