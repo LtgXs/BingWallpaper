@@ -2,15 +2,17 @@ import os
 import shutil
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import ctypes
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import time
 import subprocess
 
 CONFIG_PATH = 'config.json'
+ARCHIVE_DAYS = 10
+ARCHIVE_PATH = os.path.join(os.getenv('APPDATA'), 'AutoWallpaper', 'Archive')
 DEFAULT_CONFIG = {
-    "idx": "0",
+    "idx": 0,
     "mkt": "zh-CN",
     "chk": "true",
     "ctd": "true",
@@ -19,15 +21,45 @@ DEFAULT_CONFIG = {
     "retry_count": 10,
     "watermarks": [
         {
+            "type": "image",
             "path": "watermark1.png",
-            "posX": "2",
-            "posY": "1.2",
-            "opacity": 50 
+            "posX": 2,
+            "posY": 1.2,
+            "opacity": 50
+        },
+        {
+            "type": "text",
+            "content": "Sample Text Watermark",
+            "posX": 2,
+            "posY": 1.5,
+            "opacity": 75,
+            "font_type": "arial.ttf",
+            "font_size": 46,
+            "font_color": [128, 128, 128, 192],
+            "font_weight": "normal"
         }
     ],
     "post_execution_apps": [],
     "copy_to_paths": []
 }
+
+def archive_old_folders(base_folder, archive_folder, log_file, days=30):
+    if not os.path.exists(archive_folder):
+        os.makedirs(archive_folder)
+    cutoff_date = datetime.now() - timedelta(days=days)
+    for folder_name in os.listdir(base_folder):
+        folder_path = os.path.join(base_folder, folder_name)
+        if os.path.isdir(folder_path):
+            try:
+                folder_date = datetime.strptime(folder_name, '%Y.%m.%d')
+                if folder_date < cutoff_date:
+                    year_folder = os.path.join(archive_folder, str(folder_date.year))
+                    if not os.path.exists(year_folder):
+                        os.makedirs(year_folder)
+                    shutil.move(folder_path, os.path.join(year_folder, folder_name))
+                    log_message(f'Archived folder {folder_name} to {year_folder}', log_file)
+            except ValueError:
+                print(f'Skipped folder {folder_name} (not in yyyy.mm.dd format)')
 
 def load_config(log_file):
     config = DEFAULT_CONFIG.copy()
@@ -61,8 +93,25 @@ def validate_config_value(key, value):
         return isinstance(value, int) and value > 0
     elif key == "watermarks":
         for wm in value:
-            if not all(k in wm for k in ["path", "posX", "posY", "opacity"]):
+            if "type" not in wm or wm["type"] not in ["image", "text"]:
                 return False
+            if not all(k in wm for k in ["posX", "posY", "opacity"]):
+                return False
+            if wm["type"] == "image":
+                if "path" not in wm or not isinstance(wm["path"], str):
+                    return False
+            elif wm["type"] == "text":
+                if "content" not in wm or not isinstance(wm["content"], str):
+                    return False
+                if "font_type" in wm and not isinstance(wm["font_type"], str):
+                    return False
+                if "font_size" in wm and not isinstance(wm["font_size"], int):
+                    return False
+                if "font_color" in wm:
+                    if not (isinstance(wm["font_color"], list) and len(wm["font_color"]) == 4 and all(isinstance(c, int) for c in wm["font_color"])):
+                        return False
+                if "font_weight" in wm and wm["font_weight"] not in ["normal", "bold", "light"]:
+                    return False
             if not (isinstance(wm.get("opacity", 50), int) and 0 <= wm["opacity"] <= 100):
                 return False
         return True
@@ -98,38 +147,73 @@ def download_file(url, path, log_file, retry_delay, retry_count):
 
 def add_watermark(image_path, watermarks, watermark_file, log_file):
     try:
-        base_image = Image.open(image_path)
-        draw = ImageDraw.Draw(base_image)
-        font = ImageFont.truetype("arial.ttf", 46)
-        text = "   Auto Change Wallpaper By LtqX\nPictures all from and belong to bing"
-        text_bbox = draw.textbbox((0, 0), text, font=font)
-        textwidth, textheight = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
-        width, height = base_image.size
-        x = (width - textwidth) / 2
-        y = height - textheight - int(height * 0.10)
-        draw.text((x, y), text, font=font, fill=(128, 128, 128, 204))
-        
+        base_image = Image.open(image_path).convert("RGBA")
+        default_font = ImageFont.truetype("BRADHITC.TTF", 62)
+        copyright_text = "   Auto Change Wallpaper By LtqX\n\nPictures all from and belong to Bing"
+        add_text_watermark(base_image, copyright_text, default_font, (128, 128, 128, 204), 2, 1.2, 1, font_weight='bold')
         for i, wm in enumerate(watermarks):
-            watermark_path = wm.get('path', watermark_file)
             posX = float(wm.get('posX', '2'))
             posY = float(wm.get('posY', '1.2'))
             opacity = wm.get('opacity', 50) / 100
-            try:
-                watermark = Image.open(watermark_path).convert("RGBA")
-                watermark = watermark.resize((int(base_image.width / 5), int(base_image.height / 5)))
-                alpha = watermark.split()[3]
-                alpha = ImageEnhance.Brightness(alpha).enhance(opacity)
-                watermark.putalpha(alpha)
-                base_image.paste(watermark, (int(base_image.width / posX), int(base_image.height / posY)), watermark)
-                log_message(f'Watermark {i+1} added successfully at position ({posX}, {posY}) with opacity {opacity*100}%', log_file)
-            except FileNotFoundError:
-                log_message(f'Watermark {i+1} file not found: {watermark_path}', log_file)
-            except Exception as e:
-                log_message(f'Failed to add watermark {i+1}: {e}', log_file)
-        
-        base_image.save(image_path, quality=95)
+            
+            if wm["type"] == "image":
+                add_image_watermark(base_image, wm, watermark_file, posX, posY, opacity, log_file, i)
+            elif wm["type"] == "text":
+                add_text_watermark(base_image, wm['content'], ImageFont.truetype(wm.get('font_type', 'arial.ttf'), wm.get('font_size', 46)), 
+                                   tuple(wm.get('font_color', [128, 128, 128, 255])), posX, posY, opacity, wm.get('font_weight', 'normal'), log_file, i)
+        base_image.convert("RGB").save(image_path, quality=98)
     except Exception as e:
         log_message(f'Failed to add watermark: {e}', log_file)
+
+def add_text_watermark(base_image, text, font, color, posX, posY, opacity, font_weight='normal', log_file=None, index=None):
+    draw = ImageDraw.Draw(base_image)
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    textwidth, textheight = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+    x = (base_image.width - textwidth) / posX
+    y = (base_image.height - textheight) / posY
+    
+    text_layer = Image.new("RGBA", base_image.size, (255, 255, 255, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+    
+    if font_weight == 'bold':
+        draw_bold_text(text_draw, (x, y), text, font, tuple(color[:3]) + (int(color[3] * opacity),), boldness=1)
+    elif font_weight == 'thin':
+        draw_thin_text(text_draw, (x, y), text, font, tuple(color[:3]) + (int(color[3] * opacity),))
+    else:
+        text_draw.text((x, y), text, font=font, fill=tuple(color[:3]) + (int(color[3] * opacity),))
+    
+    base_image.alpha_composite(text_layer)
+    
+    if log_file and index is not None:
+        log_message(f'Text watermark {index+1} added successfully at position ({posX}, {posY}) with opacity {opacity*100}%', log_file)
+
+def add_image_watermark(base_image, wm, watermark_file, posX, posY, opacity, log_file, index):
+    watermark_path = wm.get('path', watermark_file)
+    try:
+        watermark = Image.open(watermark_path).convert("RGBA")
+        watermark = watermark.resize((int(base_image.width / 5), int(base_image.height / 5)))
+        alpha = watermark.split()[3]
+        alpha = ImageEnhance.Brightness(alpha).enhance(opacity)
+        watermark.putalpha(alpha)
+        base_image.paste(watermark, (int(base_image.width / posX), int(base_image.height / posY)), watermark)
+        log_message(f'Watermark {index+1} added successfully at position ({posX}, {posY}) with opacity {opacity*100}%', log_file)
+    except FileNotFoundError:
+        log_message(f'Watermark {index+1} file not found: {watermark_path}', log_file)
+    except Exception as e:
+        log_message(f'Failed to add watermark {index+1}: {e}', log_file)
+
+def draw_thin_text(draw, position, text, font, fill):
+    x, y = position
+    draw.text((x, y), text, font=font, fill=fill)
+    image = draw.im.filter(ImageFilter.GaussianBlur(1))
+    return image
+
+def draw_bold_text(draw, position, text, font, fill, boldness=1):
+    x, y = position
+    for offset in range(-boldness, boldness + 1):
+        draw.text((x + offset, y), text, font=font, fill=fill)
+        draw.text((x, y + offset), text, font=font, fill=fill)
+    return draw
 
 def set_wallpaper(image_path, log_file):
     SPI_SETDESKWALLPAPER = 20
@@ -174,6 +258,7 @@ def main():
     log_file = os.path.join(dfolder, f'{name}.log')
 
     log_message('********************Log Start********************', log_file)
+    archive_old_folders(folder, ARCHIVE_PATH, log_file, ARCHIVE_DAYS)
     config = load_config(log_file)
     idx = config['idx']
     mkt = config['mkt']
@@ -185,8 +270,13 @@ def main():
     watermarks = config['watermarks']
     post_execution_apps = config['post_execution_apps']
     copy_to_paths = config.get('copy_to_paths', [])
-    
-    watermark_details = ', '.join([f'Watermark {i+1}: path={wm["path"]}, posX={wm["posX"]}, posY={wm["posY"]}' for i, wm in enumerate(watermarks)])
+
+    watermark_details = ', '.join([
+        f'Watermark {i+1}: type={wm["type"]}, ' +
+        (f'path={wm["path"]}, ' if wm["type"] == "image" else f'content={wm["content"]}, ') +
+        f'posX={wm["posX"]}, posY={wm["posY"]}, opacity={wm["opacity"]}'
+        for i, wm in enumerate(watermarks)
+    ])
     log_message(f'Config values: idx={idx}, mkt={mkt}, chk={chk}, ctd={ctd}, wtm={wtm}, retry_delay={retry_delay}, retry_count={retry_count}, {watermark_details}, post_execution_apps={post_execution_apps}, copy_to_paths={copy_to_paths}', log_file)
 
     try:
@@ -216,20 +306,24 @@ def main():
             log_message('Failed to download image', log_file)
             return
 
-        for path in copy_to_paths:
-            try:
-                expanded_path = os.path.expandvars(path)
-                os.makedirs(expanded_path, exist_ok=True)
-                shutil.copy(image_path, os.path.join(expanded_path, f'{name}.jpg'))
-                log_message(f'Original image copied to {expanded_path}', log_file)
-            except Exception as e:
-                log_message(f'Failed to copy original image to {expanded_path}: {e}', log_file)
-
         if wtm == 'true':
             original_image_path = os.path.join(dfolder, f'{name}_original.jpg')
             shutil.copy(image_path, original_image_path)
             log_message(f'Original image saved as {original_image_path}', log_file)
             add_watermark(image_path, watermarks, watermark_file, log_file)
+
+        for path in copy_to_paths:
+            try:
+                expanded_path = os.path.expandvars(path)
+                if os.path.splitext(expanded_path)[1]:
+                    target_path = expanded_path
+                else:
+                    os.makedirs(expanded_path, exist_ok=True)
+                    target_path = os.path.join(expanded_path, f'{name}.jpg')
+                shutil.copy(image_path, target_path)
+                log_message(f'Image copied to {target_path}', log_file)
+            except Exception as e:
+                log_message(f'Failed to copy image to {expanded_path}: {e}', log_file)
 
         set_wallpaper(image_path, log_file)
 
