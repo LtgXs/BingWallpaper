@@ -47,6 +47,7 @@ def archive_old_folders(base_folder, archive_folder, log_file, days=30):
     if not os.path.exists(archive_folder):
         os.makedirs(archive_folder)
     cutoff_date = datetime.now() - timedelta(days=days)
+    archived_count = 0
     for folder_name in os.listdir(base_folder):
         folder_path = os.path.join(base_folder, folder_name)
         if os.path.isdir(folder_path):
@@ -57,9 +58,10 @@ def archive_old_folders(base_folder, archive_folder, log_file, days=30):
                     if not os.path.exists(year_folder):
                         os.makedirs(year_folder)
                     shutil.move(folder_path, os.path.join(year_folder, folder_name))
-                    log_message(f'Archived folder {folder_name} to {year_folder}', log_file)
+                    archived_count += 1
             except ValueError:
-                print(f'Skipped folder {folder_name} (not in yyyy.mm.dd format)')
+                continue
+    log_message(f'Successfully archived {archived_count} folders', log_file)
 
 def load_config(log_file):
     config = DEFAULT_CONFIG.copy()
